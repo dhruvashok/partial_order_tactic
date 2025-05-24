@@ -1,14 +1,37 @@
 /-
 Copyright (c) 2025 Joseph Qian and Dhruv Ashok. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
-Authors: Joe Cool
+Authors: Joseph Qian, Dhruv Ashok
 -/
 import Lean
 import Mathlib.Order.Defs
 import Mathlib.Util.AtomM
 
-/-
-  TODO: Notes
+/-!
+
+# partiarith Tactic
+
+The `partiarith` tactic is created in this file. This tactic, which works over partially ordered
+sets, attempts to generate a proof of a the main goal, which must be an inequality between elements
+in the partially ordered set. Used as is, the tactic makes use of all hypotheses in the local
+context that are inequalities (or equalities) between elements in the partially ordered set.
+However, the user can specify which hypotheses from the local context to use, along with proof
+terms which might not already be in the local context.
+
+## Implementation Notes
+
+This tactic defines a recognizer `le?`, which is used to check whether or not an Expr is a less-
+than-or-equal inequality. It is essentially a macro for `Expr.app3?`.
+
+ * what does "including use of type classes and simp canonical form for new definitions" mean
+ * discuss dfs / bfs  choice if/when that's implemented
+
+## References
+
+This code was heavily inspired by the code for the tactic `polyrith`, which was written by
+Dhruv Bhatia, who advised me on this project as part of a research project with the Math AI
+Lab at the University of Washington.
+
 -/
 
 namespace Mathlib.Tactic.Partiarith
@@ -16,21 +39,10 @@ open Lean Meta
 open Qq AtomM PrettyPrinter
 initialize registerTraceClass `Meta.Tactic.partiarith
 
-
 @[inline] def le? (p : Expr) : Option (Expr × Expr × Expr) :=
   p.app3? ``LE
 
-/-- Parses local context and hypotheses (provided by client).
- --  > Params
- --     > only : if true, parseContext ignores local context and only parses hypotheses
- --     > hyps : list of hypotheses provided by client
- --     > tgt : target inequality (a ≤ b)
- --
- --  > Returns
- --     > (e₁, e₂, out, nodes) : e₁ = a, e₂ = b, out is an array of Expr × Expr × Expr,
- --       where each element represents a hypothesis a ≤ b, and nodes is an array of
- --       all distinct variables, e.g. a, b.
- -/
+/-- Parses local context and hypotheses (provided by client). -/
 def parseContext (only: Bool) (hyps: Array Expr) (tgt: Expr) :
     AtomM (Expr × Expr × Array (Expr × (Expr × Expr)) × Array Expr) := do
     let fail {α} : AtomM α := throwError "bad"
@@ -40,14 +52,7 @@ def parseContext (only: Bool) (hyps: Array Expr) (tgt: Expr) :
     have α : Q(Type v) := α
     have e₁ : Q($α) := e₁; have e₂ : Q($α) := e₂
     let rec
-    /-- Parses a hypothesis and adds it to the `out` list.
-     --  > Params
-     --     > ty : an Expr representing a hypothesis.
-     --     > out : the Array of edges, which will be updated by processHyp.
-     --
-     --  > Returns
-     --     > out : an updated Array of edges.
-     -/
+    /-- Processes a hypothesis and adds it to the `out` list. -/
     processHyp (ty : Expr) (out: Array (Expr × (Expr × Expr))) := do
       if let some (β, e₁, e₂) := (← instantiateMVars (← inferType ty)).le? then
         -- Check for less-than-equal
@@ -78,21 +83,10 @@ structure DfsData where
   pathSoFar : Array (Expr × (Expr × Expr))
   toDiscover : Array (Expr)
 
-/-- Performs a depth-first search over a directed graph representing the local context
- -- and user-defined hypotheses. The nodes of the graph are elements of the poset and
- -- the edges represent the ≤ relation, pointing from the smaller element to the larger
- -- element. In the case of equality, we use a bidirectional edge.
- --  > Params
- --     > v₁ : the starting node.
- --     > v₂ : the target node.
- --     > edges : an Array containing every edge in the graph.
- -      > nodes : an Array containing every node in the graph.
- --    Note: the parameters of dfs_outer are the outputs of parseContext.
- --
- --  > Returns
- --     > pathSoFar : an Array (Expr × (Expr × Expr)) representing a path from v₁ to
- --       v₂, or none if no path was found.
- -/
+/-- Performs a depth-first search over a directed graph representing the local context and user-
+defined hypotheses. The nodes of the graph are elements of the poset and the edges represent the ≤
+relation, pointing from the smaller element to the larger element. In the case of equality, we use
+a bidirectional edge. -/
 def dfsOuter (v₁ : Expr) (v₂ : Expr) (edges : Array (Expr × (Expr × Expr))) (nodes : Array Expr)
     (trace := false) : MetaM (Option (Array (Expr × (Expr × Expr)))) := do
   let mut nodes := nodes
@@ -106,16 +100,7 @@ def dfsOuter (v₁ : Expr) (v₂ : Expr) (edges : Array (Expr × (Expr × Expr))
     return out
 
   let rec
-  /-- Recursively performs depth-first search on the directed graph.
-   --  > Params
-   --     > node : the next node to be explored by the DFS algorithm
-   --     > currentData : a dfs_data structure representing the current state of the
-            DFS.
-   --
-   --  > Returns
-   --     > pathSoFar : an Array (Expr × (Expr × Expr)) representing a path from v₁ to
-   --       v₂, or none if no path was found.
-   -/
+  /-- Recursively performs a depth-first search on the directed graph. -/
   dfsLoop (node : Expr) (currentData : DfsData) :
     MetaM (Option (Array (Expr × (Expr × Expr)))) :=
   do
@@ -139,7 +124,7 @@ def dfsOuter (v₁ : Expr) (v₂ : Expr) (edges : Array (Expr × (Expr × Expr))
     rw [Array.size_feraseIdx]
     apply Nat.sub_one_lt
     apply Nat.ne_of_gt
-    apply Fin.size_pos;
+    apply Fin.size_pos
     exact i
     }
 
@@ -160,17 +145,9 @@ def proofFromPath (path : Array (Expr × Expr × Expr)) : Option (MetaM Expr) :=
 
 
 
-/-- Polyrith for posets.
- --  > Params
- --     > g : the goal; partiarith will attempt to build and return a proof of `g`.
- --     > only : if true, partiarith will only use the user-defined hypotheses `hyps`.
- --       Otherwise, partiarith will use hyps and the local context.
- --     > hyps : an Array of user-defined hypotheses.
- --     > traceOnly : if true, debugging messages will be printed.
- --
- --  > Returns
- --     > newGoal : a proof of `g`, or none if `g` cannot be proved.
- -/
+/-- Given a set of relevant hypotheses (in the local context and/or user-defined hypotheses),
+`partiarith` attempts to build a proof of the main goal, which must be an inequality between
+elements of a partially ordered set. -/
 def partiarith (g : MVarId) (only : Bool) (hyps : Array Expr)
     (traceOnly := false) : MetaM (Except MVarId (Expr)) := do
     g.withContext <| AtomM.run .reducible do
