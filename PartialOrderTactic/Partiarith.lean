@@ -39,13 +39,16 @@ open Lean Meta
 open Qq AtomM PrettyPrinter
 initialize registerTraceClass `Meta.Tactic.partiarith
 
+/-- A recognizer for ≤ -/
 @[inline] def le? (p : Expr) : Option (Expr × Expr × Expr) :=
   p.app3? ``LE
+
+/-! # DFS helper functions -/
 
 /-- Parses local context and hypotheses (provided by client). -/
 def parseContext (only: Bool) (hyps: Array Expr) (tgt: Expr) :
     AtomM (Expr × Expr × Array (Expr × (Expr × Expr)) × Array Expr) := do
-    let fail {α} : AtomM α := throwError "bad"
+    let fail {α} : AtomM α := throwError "bad goal: main goal must be of the form a ≤ b or a ≥ b"
     let some (α, e₁, e₂) := (← whnfR <|← instantiateMVars tgt).le? | fail
     let .sort u ← instantiateMVars (← whnf (← inferType α)) | unreachable!
     let some v := u.dec | throwError "not a type{indentExpr α}"
@@ -78,9 +81,11 @@ def parseContext (only: Bool) (hyps: Array Expr) (tgt: Expr) :
     let nodes := (← get).atoms
     pure (e₁, e₂, out, nodes)
 
-
+/-- A representation of the current state of the DFS traversal -/
 structure DfsData where
+  /-- An Array containing the hypotheses in the path that has been built so far. -/
   pathSoFar : Array (Expr × (Expr × Expr))
+  /-- An Array of the terms that have not yet been discovered by the DFS algorithm. -/
   toDiscover : Array (Expr)
 
 /-- Performs a depth-first search over a directed graph representing the local context and user-
@@ -143,11 +148,31 @@ def proofFromPath (path : Array (Expr × Expr × Expr)) : Option (MetaM Expr) :=
       firstProof (proofs.erase firstProof)
 
 
+/-! # Main function -/
 
+/--
+This is the main body of the `partiarith` tactic. It takes in the following inputs:
+* `g : MVarId` - the main goal
+* `only : Bool` - This represents whether the user used the key word "only"
+* `hyps : Array Expr` - the hypotheses/proof terms selected by the user
+* `traceOnly : Bool` - If enabled, the returned syntax will be `.missing`
 
-/-- Given a set of relevant hypotheses (in the local context and/or user-defined hypotheses),
-`partiarith` attempts to build a proof of the main goal, which must be an inequality between
-elements of a partially ordered set. -/
+First, the tactic verifies that `g` is an inequality between two terms of the same type, and throws
+an error if this is not the case. Then, it collects all relevant hypotheses/proof terms from the
+local context and from those selected by the user, taking into account whether `only` is true.
+The hypotheses are added to an `Array` and all unique terms in the hypotheses are added
+to a list of atoms.
+
+The tactic then performs a depth-first search over the `Array` of hypotheses in order to find a
+path betewen the two terms in the main goal. This path is a sequence of inequalities, either all
+less than or equal or all greater than or equal statements. The `Array` is designed to contain all
+of the information that would normally be stored in a graph representation of the hypotheses, where
+hypotheses are edges and the terms are nodes.
+
+If a path is found, the tactic converts it into a proof of the main goal via transitivity, and uses
+it to close the main goal. Otherwise, return `.error g` if no path was found or if a proof could
+not be made from the path.
+-/
 def partiarith (g : MVarId) (only : Bool) (hyps : Array Expr)
     (traceOnly := false) : MetaM (Except MVarId (Expr)) := do
     g.withContext <| AtomM.run .reducible do
@@ -159,6 +184,32 @@ def partiarith (g : MVarId) (only : Bool) (hyps : Array Expr)
       return (.ok (← proofProgram))
     | none => return (Except.error g)
 
+/--
+Attempts to prove a user-specified inequality in a partially ordered set by transitivity on
+hypotheses in the local context (and additional proof terms if the user specifies them). If
+successful, the main goal will be closed.
+
+* `partiarith` will use all relevant hypotheses in the local context.
+* `partiarith [t1, t2, t3]` will add proof terms t1, t2, t3 to the local context.
+* `partiarith only [h1, h2, h3, t1, t2, t3]` will use only local hypotheses
+  `h1`, `h2`, `h3`, and proofs `t1`, `t2`, `t3`. It will ignore the rest of the local context.
+
+Examples:
+
+```lean
+example (a b c : α) [PartialOrder α] (hab : a ≤ b) (hbc : b ≤ c) :
+    a ≤ c := by
+  partiarith
+
+example (a b c : α) [PartialOrder α] (hab : a = b) (hbc : b = c) :
+    a ≤ c := by
+  partiarith
+
+example (a b c d e: α) [PartialOrder α] (hab : a ≤ b) (hac : a ≤ c) (hbc : c = b)
+    (hbd : b ≤ d) (hce : c ≤ e) : a ≤ e := by
+  partiarith only [hab, hbc, hce]
+```
+-/
 syntax "partiarith" (&" only")? (" [" term,* "]")? : tactic
 
 open Elab Tactic
