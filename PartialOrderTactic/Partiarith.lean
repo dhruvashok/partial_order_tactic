@@ -55,7 +55,7 @@ def parseContext (only: Bool) (hyps: Array Expr) (tgt: Expr) :
     have α : Q(Type v) := α
     have e₁ : Q($α) := e₁; have e₂ : Q($α) := e₂
     let rec
-    /-- Processes a hypothesis and adds it to the `out` list. -/
+    /-- Parses a hypothesis and adds it to the `out` list. -/
     processHyp (ty : Expr) (out: Array (Expr × (Expr × Expr))) := do
       if let some (β, e₁, e₂) := (← instantiateMVars (← inferType ty)).le? then
         -- Check for less-than-equal
@@ -88,10 +88,10 @@ structure DfsData where
   /-- An Array of the terms that have not yet been discovered by the DFS algorithm. -/
   toDiscover : Array (Expr)
 
-/-- Performs a depth-first search over a directed graph representing the local context and user-
-defined hypotheses. The nodes of the graph are elements of the poset and the edges represent the ≤
-relation, pointing from the smaller element to the larger element. In the case of equality, we use
-a bidirectional edge. -/
+/-- Performs a depth-first search over a directed graph representing the local context
+ -- and user-defined hypotheses. The nodes of the graph are elements of the poset and
+ -- the edges represent the ≤ relation, pointing from the smaller element to the larger
+ -- element. In the case of equality, we use a bidirectional edge. -/
 def dfsOuter (v₁ : Expr) (v₂ : Expr) (edges : Array (Expr × (Expr × Expr))) (nodes : Array Expr)
     (trace := false) : MetaM (Option (Array (Expr × (Expr × Expr)))) := do
   let mut nodes := nodes
@@ -105,7 +105,8 @@ def dfsOuter (v₁ : Expr) (v₂ : Expr) (edges : Array (Expr × (Expr × Expr))
     return out
 
   let rec
-  /-- Recursively performs a depth-first search on the directed graph. -/
+
+  /-- Recursively performs depth-first search on the directed graph. -/
   dfsLoop (node : Expr) (currentData : DfsData) :
     MetaM (Option (Array (Expr × (Expr × Expr)))) :=
   do
@@ -138,6 +139,40 @@ def dfsOuter (v₁ : Expr) (v₂ : Expr) (edges : Array (Expr × (Expr × Expr))
   -- if trace then logInfo traceString
   return path
 
+def bfs (v₁ : Expr) (v₂ : Expr) (domain : Array Expr) (to_visit : List $ (Expr × (Expr × Expr)) ×
+    Array (Expr × (Expr × Expr))) (edges : Array (Expr × (Expr × Expr))) (_h : domain.size ≠ 0) :
+    OptionT MetaM $ Array (Expr × (Expr × Expr)) := do
+  let in_domain ← to_visit.filterM λe => domain.anyM (isDefEq e.1.2.2 .)
+  let lift {α : Type} (o : Option α) := OptionT.mk $ pure o
+
+  match in_domain with
+    | List.nil => lift none
+    | List.cons ⟨x, path⟩ xs =>
+      let path' := path ++ [x]
+
+      if ← isDefEq x.2.2 v₂ then
+        lift $ some path'
+      else
+        let children ← edges.filterM λe => isDefEq e.2.1 x.2.2
+        let domain' := domain.feraseIdx $ ← domain.indexOf? x.2.2|> lift
+        if h₁ : domain'.size ≠ 0 then
+          bfs v₁ v₂ domain' (xs ++ children.toList.map (⟨., path'⟩)) edges h₁
+        else
+          lift none
+termination_by domain.size
+decreasing_by (
+  rw [Array.size_feraseIdx]
+  exact Nat.sub_one_lt _h
+)
+
+def bfsOuter (v₁ : Expr) (v₂ : Expr) (edges : Array (Expr × (Expr × Expr))) (nodes : Array Expr)
+    (trace := false) : MetaM (Option (Array (Expr × (Expr × Expr)))) := do
+    let nodes' := nodes.erase v₁
+    if h : nodes'.size ≠ 0 then
+      let children ← edges.filterM λe => isDefEq e.2.1 v₁
+      bfs v₁ v₂ nodes' (children.toList.map λe => ⟨e, ⟨[]⟩⟩) edges h
+    else
+      pure none
 
 def proofFromPath (path : Array (Expr × Expr × Expr)) : Option (MetaM Expr) := do
   let proofs := path.map (fun x => x.1)
@@ -173,15 +208,15 @@ If a path is found, the tactic converts it into a proof of the main goal via tra
 it to close the main goal. Otherwise, return `.error g` if no path was found or if a proof could
 not be made from the path.
 -/
-def partiarith (g : MVarId) (only : Bool) (hyps : Array Expr)
+def partiarith (g : MVarId) (only : Bool) (is_bfs := false) (hyps : Array Expr)
     (traceOnly := false) : MetaM (Except MVarId (Expr)) := do
     g.withContext <| AtomM.run .reducible do
     let (v₁, v₂, edges, nodes) ← parseContext only hyps (← g.getType)
-    match ← dfsOuter v₁ v₂ edges nodes traceOnly with
+    match ← (if is_bfs then bfsOuter else dfsOuter) v₁ v₂ edges nodes with
     | some pathToDest => match (proofFromPath pathToDest) with
       | none => return (.error g)
       | some proofProgram =>
-      return (.ok (← proofProgram))
+        return (.ok (← proofProgram))
     | none => return (Except.error g)
 
 /--
@@ -210,15 +245,15 @@ example (a b c d e: α) [PartialOrder α] (hab : a ≤ b) (hac : a ≤ c) (hbc :
   partiarith only [hab, hbc, hce]
 ```
 -/
-syntax "partiarith" (&" only")? (" [" term,* "]")? : tactic
+syntax "partiarith" (&" only")? (&" bfs")? (" [" term,* "]")? : tactic
 
 open Elab Tactic
 elab_rules : tactic
-  | `(tactic| partiarith $[only%$onlyTk]? $[[$hyps,*]]?) => do
+  | `(tactic| partiarith $[only%$onlyTk]? $[bfs%$bfsTk]? $[[$hyps,*]]?) => do
     let hyps ← hyps.map (·.getElems) |>.getD #[] |>.mapM (elabTerm · none)
     let traceMe ← Lean.isTracingEnabledFor `Meta.Tactic.partiarith
     let g ← getMainGoal
-    match ← partiarith g onlyTk.isSome hyps traceMe with
+    match ← partiarith g onlyTk.isSome bfsTk.isSome hyps traceMe with
     | .ok newGoal =>
       if traceMe then logInfo f!"{← delab newGoal}"
       Lean.Elab.Tactic.closeMainGoal `partiarith newGoal
