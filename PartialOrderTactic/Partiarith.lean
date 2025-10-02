@@ -139,6 +139,7 @@ def dfsOuter (v₁ : Expr) (v₂ : Expr) (edges : Array (Expr × (Expr × Expr))
   -- if trace then logInfo traceString
   return path
 
+/-- Recursively performs breadth-first search on the directed graph. -/
 def bfs (v₁ : Expr) (v₂ : Expr) (domain : Array Expr) (to_visit : List $ (Expr × (Expr × Expr)) ×
     Array (Expr × (Expr × Expr))) (edges : Array (Expr × (Expr × Expr))) (_h : domain.size ≠ 0) :
     OptionT MetaM $ Array (Expr × (Expr × Expr)) := do
@@ -165,6 +166,7 @@ decreasing_by (
   exact Nat.sub_one_lt _h
 )
 
+/-- Find all edges starting from a given node. -/
 def bfsOuter (v₁ : Expr) (v₂ : Expr) (edges : Array (Expr × (Expr × Expr))) (nodes : Array Expr)
     (trace := false) : MetaM (Option (Array (Expr × (Expr × Expr)))) := do
   let nodes' := nodes.erase v₁
